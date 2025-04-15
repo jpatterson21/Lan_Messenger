@@ -1,0 +1,318 @@
+print("🔧 Starting script...")
+
+import os
+import subprocess
+import logging
+import socket
+from datetime import datetime
+from flask import Flask, render_template_string, request, send_from_directory
+from flask_socketio import SocketIO, emit
+from werkzeug.utils import secure_filename
+
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Doesn't matter if unreachable
+        s.connect(("10.255.255.255", 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = "127.0.0.1"
+    finally:
+        s.close()
+    return IP
+
+# Suppress session reconnect spam
+logging.getLogger('socketio').setLevel(logging.ERROR)
+logging.getLogger('engineio').setLevel(logging.ERROR)
+
+# Set up upload folder
+UPLOAD_FOLDER = os.path.expanduser('~/Lan_Messenger_Uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+socketio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
+
+# 🛑 Suppress noisy logs
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+logging.getLogger('socketio').setLevel(logging.WARNING)
+logging.getLogger('engineio').setLevel(logging.WARNING)
+
+message_history = []
+connected_users = {}
+user_count = 0
+
+print("📦 Imports and setup done.")
+
+print(f"""
+===========================================
+🚀 LAN Messenger Started Successfully!
+🌐 Access it at: http://{get_local_ip()}:5000
+===========================================
+""")
+
+# HTML + CSS + JS UI
+HTML = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LAN Messenger</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Roboto', sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #f5f5f5;
+      color: #333;
+    }
+    header {
+      background-color: #4a90e2;
+      padding: 1em;
+      text-align: center;
+      color: white;
+      font-size: 1.5em;
+    }
+    .container {
+      display: flex;
+      gap: 20px;
+      padding: 20px;
+    }
+    .panel {
+      background-color: white;
+      border-radius: 8px;
+      padding: 1em;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .messages {
+      width: 60%;
+      height: 400px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+    }
+    .users {
+      width: 30%;
+      height: 400px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+    }
+    .form {
+      margin-top: 20px;
+      display: flex;
+      gap: 10px;
+    }
+    input[type="text"] {
+      flex: 1;
+      padding: 0.5em;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      background-color: #4a90e2;
+      color: white;
+      border: none;
+      padding: 0.5em 1em;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #357ABD;
+    }
+  </style>
+</head>
+<body>
+  <header>LAN Messenger</header>
+  <div class="container">
+    <div class="panel messages" id="messages">Loading messages...</div>
+    <div class="panel users" id="users">Connecting...</div>
+  </div>
+  <div class="container">
+    <form id="msgform" class="form">
+      <input id="msginput" type="text" placeholder="Type your message..." required />
+      <button type="submit">Send</button>
+    </form>
+    <input id="upload" type="file" />
+  </div>
+
+  <script>
+    const socket = io({
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      timeout: 5000
+    });
+
+    const msgBox = document.getElementById('messages');
+    const userBox = document.getElementById('users');
+    const input = document.getElementById('msginput');
+    const form = document.getElementById('msgform');
+    const upload = document.getElementById('upload');
+
+let userName = localStorage.getItem('userName');
+
+if (!userName) {
+    const entered = prompt("Enter your display name:", "");
+    if (entered && entered.trim() !== "") {
+        userName = entered.trim();
+    } else {
+        userName = "User" + Math.floor(Math.random() * 1000);
+    }
+    localStorage.setItem("userName", userName);
+}
+socket.on("connect", () => {
+    socket.emit("set_name", userName); 
+});
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      const msg = input.value.trim();
+      if (msg) {
+        socket.emit('send_message', { name: userName, message: msg });
+        input.value = '';
+      }
+    });
+
+    upload.addEventListener('change', function () {
+      const file = upload.files[0];
+      if (!file) return;
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('from', userName);
+
+      fetch('/upload', {
+        method: 'POST',
+        body: formData
+      }).then(res => {
+        if (res.ok) console.log('File uploaded');
+      });
+    });
+
+    socket.on('connect', () => console.log('✅ Connected'));
+
+    socket.on('history', function (messages) {
+      msgBox.innerHTML = '';
+      messages.forEach(msg => {
+        const div = document.createElement('div');
+        div.innerHTML = msg;
+        msgBox.appendChild(div);
+      });
+    });
+
+    socket.on('message', function (data) {
+      const div = document.createElement('div');
+      div.innerHTML = data;
+      msgBox.appendChild(div);
+      while (msgBox.children.length > 20) {
+        msgBox.removeChild(msgBox.firstChild);
+      }
+    });
+
+    socket.on('users', function (userList) {
+      userBox.innerHTML = '';
+      userList.forEach(user => {
+        const div = document.createElement('div');
+        div.innerText = user;
+        userBox.appendChild(div);
+      });
+    });
+  </script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def index():
+    return render_template_string(HTML)
+
+@app.route('/upload', methods=['POST'])
+def upload():
+    if 'file' not in request.files:
+        return 'No file part', 400
+    file = request.files['file']
+    from_user = request.form.get('from', 'Unknown')
+    if file.filename == '':
+        return 'No selected file', 400
+    filename = secure_filename(file.filename)
+    save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(save_path)
+    link = f'<b>{from_user}</b> uploaded: <a href="/uploads/{filename}" target="_blank">{filename}</a>'
+    message_history.append(link)
+    message_history[:] = message_history[-20:]
+    socketio.emit('message', link)
+    return 'File uploaded', 200
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+@socketio.on('connect')
+def handle_connect():
+    global user_count
+    user_id = request.sid
+    name = f"User{user_count + 1}"
+    connected_users[user_id] = name
+    user_count += 1
+    emit('history', message_history)
+    socketio.emit('users', list(connected_users.values()))
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    user_id = request.sid
+    if user_id in connected_users:
+        del connected_users[user_id]
+    socketio.emit('users', list(connected_users.values()))
+
+@socketio.on('set_name')
+def handle_set_name(name):
+    user_id = request.sid
+    connected_users[user_id] = name
+    socketio.emit('users', list(connected_users.values()))
+
+@socketio.on("send_message")
+def handle_send_message(data):
+    name = data.get("name", "Anonymous")
+    msg = data.get("message", "")
+    timestamp = datetime.now().strftime('%H:%M')
+    formatted = f"<b>{name}</b> [{timestamp}]: {msg}"
+    message_history.append(formatted)
+    message_history[:] = message_history[-20:]
+    socketio.emit("message", formatted)
+    print(f"[{timestamp}] {name}: {msg}")
+    os.system(f"wall '[LAN Messenger] {name}: {msg}'")
+
+@app.route('/send', methods=['POST'])
+def send():
+    msg  = request.form.get('message', '')
+    name = request.form.get('name', 'CLI')
+    timestamp = datetime.now().strftime('%H:%M')
+    formatted = f"<b>{name}</b> [{timestamp}]: {msg}"
+    message_history.append(formatted)
+    message_history[:] = message_history[-20:]
+    socketio.emit('message', formatted)
+    print(f"[{timestamp}] {name}: {msg}")
+
+    try:
+        subprocess.run(
+            ['wall', f'[LAN Messenger] {name}: {msg}'],
+            check=True,
+            stderr=subprocess.PIPE
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ wall failed: {e.stderr.decode()}")
+
+    return f"Sent: {formatted}"
+if __name__ == '__main__':
+    print("🟢 About to run socketio...")
+
+    try:
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+        print("✅ socketio.run() started (you shouldn't see this unless it exits cleanly)")
+    except Exception as e:
+        print(f"❌ Exception occurred in socketio.run(): {e}")
+        print("⏳ Waiting 5 seconds before exiting...")
+        import time
+        time.sleep(5)
